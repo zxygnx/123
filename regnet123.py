@@ -3,6 +3,19 @@ import torch.nn as nn
 import torch.nn.functional as F
 import copy
 import torch.optim as optim
+import time
+# 定义ConvRNN模块
+class ConvRNN(nn.Module):
+    def __init__(self, input_channels, hidden_channels, kernel_size):
+        super(ConvRNN, self).__init__()
+        self.conv = nn.Conv2d(input_channels + hidden_channels, hidden_channels, kernel_size, padding=1)
+
+    def forward(self, x, h):
+        combined = torch.cat((x, h), dim=1)
+        h = self.conv(combined)
+        return h
+
+# 修改Block类以集成ConvRNN模块
 class Block(nn.Module):
     def __init__(self, in_channels, out_channels, stride):
         super(Block, self).__init__()
@@ -20,7 +33,10 @@ class Block(nn.Module):
                 nn.BatchNorm2d(out_channels),
             )
 
-    def forward(self, x):
+        # 添加ConvRNN模块
+        self.convrnn = ConvRNN(out_channels, out_channels, kernel_size=3)
+
+    def forward(self, x, h=None):
         identity = self.downsample(x)
 
         out = self.conv1(x)
@@ -33,11 +49,14 @@ class Block(nn.Module):
         out += identity
         out = self.relu(out)
 
+
+        if h is not None:
+            out = self.convrnn(out, h)
+
         return out
 
-
 class RegNet(nn.Module):
-    def __init__(self, num_classes=1000):  # Default for ImageNet
+    def __init__(self, num_classes=1000):
         super(RegNet, self).__init__()
         # Simplified RegNet settings
         layers = [2, 4, 6, 2]  # Example configuration, should be adjusted based on Y parameter
@@ -62,6 +81,9 @@ class RegNet(nn.Module):
             layers.append(Block(out_channels, out_channels, 1))
         return nn.Sequential(*layers)
 
+    def count_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
     def forward(self, x):
         x = self.conv1(x)
         x = self.bn1(x)
@@ -81,31 +103,36 @@ class RegNet(nn.Module):
 import torchvision
 import torchvision.transforms as transforms
 
-def load_cifar10(batch_size):
+def load_cifar100(batch_size):
     transform = transforms.Compose(
         [transforms.ToTensor(),
          transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
 
-    trainset = torchvision.datasets.CIFAR10(root='./data', train=True,
-                                            download=True, transform=transform)
+    trainset = torchvision.datasets.CIFAR100(root='./data', train=True,
+                                              download=True, transform=transform)
     trainloader = torch.utils.data.DataLoader(trainset, batch_size=batch_size,
                                               shuffle=True, num_workers=2)
 
-    testset = torchvision.datasets.CIFAR10(root='./data', train=False,
-                                           download=True, transform=transform)
+    testset = torchvision.datasets.CIFAR100(root='./data', train=False,
+                                             download=True, transform=transform)
     testloader = torch.utils.data.DataLoader(testset, batch_size=batch_size,
                                              shuffle=False, num_workers=2)
     return trainloader, testloader
+
+
 
 
 def train_and_evaluate(model, trainloader, testloader, epochs=150):
     criterion = nn.CrossEntropyLoss().to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    best_acc = 0.0  # 用于跟踪最高准确率
-    best_model_wts = copy.deepcopy(model.state_dict())  # 保存最佳模型权重
+    best_acc = 0.0
+    best_model_wts = copy.deepcopy(model.state_dict())
+
+    total_start_time = time.time()  # 记录训练开始时间
 
     for epoch in range(epochs):
+        epoch_start_time = time.time()  # 记录每个 epoch 开始时间
         model.train()
         train_loss = 0.0
         for inputs, labels in trainloader:
@@ -143,7 +170,17 @@ def train_and_evaluate(model, trainloader, testloader, epochs=150):
             best_acc = acc
             best_model_wts = copy.deepcopy(model.state_dict())
 
+        epoch_end_time = time.time()  # 记录每个 epoch 结束时间
+        epoch_time_elapsed = epoch_end_time - epoch_start_time  # 计算每个 epoch 所花费的时间
+        remaining_time = epoch_time_elapsed * (epochs - epoch - 1)  # 计算剩余的预计完成时间
+
+        print(f'Epoch {epoch + 1} took {epoch_time_elapsed // 60:.0f}m {epoch_time_elapsed % 60:.0f}s, Estimated remaining time: {remaining_time // 60:.0f}m {remaining_time % 60:.0f}s')
+
+    total_end_time = time.time()  # 记录训练结束时间
+    total_time_elapsed = total_end_time - total_start_time  # 计算总体花费的时间
+    print(f'Training complete in {total_time_elapsed // 60:.0f}m {total_time_elapsed % 60:.0f}s')
     print(f'Best Accuracy: {best_acc}%')
+
     # 加载最佳模型权重
     model.load_state_dict(best_model_wts)
     # 保存最佳模型
@@ -152,6 +189,6 @@ def train_and_evaluate(model, trainloader, testloader, epochs=150):
 
 if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = RegNet(num_classes=10).to(device)
-    trainloader, testloader = load_cifar10(batch_size=64)
+    model = RegNet(num_classes=100).to(device)  # 注意修改 num_classes
+    trainloader, testloader = load_cifar100(batch_size=64)  # 加载 CIFAR-100 数据集
     train_and_evaluate(model, trainloader, testloader)
